@@ -60,6 +60,22 @@ EXT_CATEGORY = {
     **dict.fromkeys(["epub", "mobi", "azw3"], "Ebooks"),
 }
 
+# The extension decides which folders are even possible; the model only picks
+# among those. Small models name files well but misfile them when given free rein.
+ALLOWED = {
+    "Documents": ["Documents", "Invoices & Receipts"],
+    "Spreadsheets": ["Spreadsheets", "Invoices & Receipts"],
+    "Images": ["Images", "Screenshots", "Invoices & Receipts"],
+}
+
+
+def allowed_categories(ext: str) -> list[str]:
+    base = EXT_CATEGORY.get(ext)
+    if base is None:
+        return CATEGORIES
+    return ALLOWED.get(base, [base])
+
+
 TEXT_EXTS = {"txt", "md", "csv", "tsv", "json", "py", "js", "ts", "html", "css", "yml", "yaml", "sh", "ps1", "log", "xml", "ini", "toml"}
 
 # Files that are still downloading, or that belong to the OS.
@@ -154,8 +170,8 @@ def fingerprint(info: FileInfo) -> str:
 # ------------------------------------------------------------------- naming
 
 def slugify(text: str, max_len: int = 60) -> str:
-    text = text.lower()
-    text = re.sub(r"\.[a-z0-9]{1,5}$", "", text)            # stray extension
+    text = text.lower().replace("_", " ")
+    text = re.sub(r"\.[a-z][a-z0-9]{0,4}$", "", text)       # stray extension, not "1.105.0"
     text = re.sub(r"\(\d+\)|\bcopy\b|\bfinal\b", " ", text)  # "(1)", "copy"
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     text = re.sub(r"-{2,}", "-", text)
@@ -179,31 +195,35 @@ def heuristic_guess(info: FileInfo) -> dict:
 SYSTEM_PROMPT = (
     "You tidy a messy Downloads folder. For each file you get its current "
     "name, extension, size and, when available, the first lines of its "
-    "content. Pick the single best category from the allowed list and "
-    "propose a short, descriptive, lowercase file name of 2 to 6 words "
-    "separated by hyphens, WITHOUT extension and WITHOUT a date. Prefer "
-    "what the content is about (vendor, topic, project) over the original "
-    "gibberish name. Keep it the same language as the content. If you are "
-    "unsure, keep the meaning of the original name. Give a reason in under "
-    "12 words."
+    "content. Pick the best category from the allowed list and propose a "
+    "short, descriptive, lowercase file name of 2 to 5 words separated by "
+    "hyphens, WITHOUT extension and WITHOUT a date. Prefer what the content "
+    "is about (vendor, topic, project) over the original gibberish name. "
+    "Keep it the same language as the content. If the content is not "
+    "readable, just tidy up the original name and keep any numbers or dates "
+    "in it; never use words like unclear, unknown or something. Give a "
+    "plain reason in under 10 words."
 )
 
-RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "category": {"type": "string", "enum": CATEGORIES},
-        "name": {"type": "string"},
-        "reason": {"type": "string"},
-    },
-    "required": ["category", "name", "reason"],
-}
+def response_schema(categories: list[str]) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string", "enum": categories},
+            "name": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["category", "name", "reason"],
+    }
 
 
 class Ollama:
-    def __init__(self, host: str, model: str, timeout: float = 120):
+    def __init__(self, host: str, model: str, timeout: float = 120, cpu: bool = False, log=print):
         self.host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.cpu = cpu
+        self.log = log
 
     def available(self) -> bool:
         try:
@@ -215,7 +235,9 @@ class Ollama:
         return self.model in names or f"{self.model}:latest" in names
 
     def classify(self, info: FileInfo) -> dict:
+        choices = allowed_categories(info.ext)
         user = (
+            f"Allowed categories: {', '.join(choices)}\n"
             f"File name: {info.path.name}\n"
             f"Extension: .{info.ext or '(none)'}\n"
             f"Size: {human_size(info.size)}\n"
@@ -224,26 +246,44 @@ class Ollama:
         body = {
             "model": self.model,
             "stream": False,
-            "format": RESPONSE_SCHEMA,
-            "options": {"temperature": 0},
+            "format": response_schema(choices),
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ],
         }
+        for attempt in range(3):
+            try:
+                reply = self._chat(body)
+                break
+            except (urllib.error.URLError, ConnectionError) as e:
+                # Older GPUs and drivers often can't load the model (a 500, or the
+                # runner dying mid-request); the CPU always can. The runner can
+                # also drop a request while it restarts, so allow one more try.
+                if attempt == 2 or (isinstance(e, urllib.error.HTTPError) and e.code != 500):
+                    raise
+                if not self.cpu:
+                    self.cpu = True
+                    self.log("  ! the GPU couldn't load the model; switching to CPU (slower, still offline)")
+        data = json.loads(reply["message"]["content"])
+        if data.get("category") not in choices:
+            data["category"] = choices[0] if len(choices) < len(CATEGORIES) else "Other"
+        name = slugify(str(data.get("name", "")))
+        data["name"] = "-".join(name.split("-")[:6])
+        data["reason"] = str(data.get("reason", ""))[:120]
+        return data
+
+    def _chat(self, body: dict) -> dict:
+        options = {"temperature": 0}
+        if self.cpu:
+            options["num_gpu"] = 0
         req = urllib.request.Request(
             f"{self.host}/api/chat",
-            data=json.dumps(body).encode(),
+            data=json.dumps({**body, "options": options}).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            reply = json.load(r)
-        data = json.loads(reply["message"]["content"])
-        if data.get("category") not in CATEGORIES:
-            data["category"] = "Other"
-        data["name"] = slugify(str(data.get("name", "")))
-        data["reason"] = str(data.get("reason", ""))[:120]
-        return data
+            return json.load(r)
 
 
 # ----------------------------------------------------------------- planning
@@ -276,15 +316,19 @@ def plan(folder: Path, files: list[FileInfo], model: Ollama | None,
         if guess is None:
             source = "heuristic"
             guess = heuristic_guess(info)
-            if model is not None:
+            # With no readable text the model can only guess from the name, and
+            # small models embellish. Tidying the name ourselves is more honest.
+            if model is not None and info.snippet:
                 try:
                     guess = model.classify(info)
                     source = "model"
                 except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
                     log(f"  ! model failed on {info.path.name} ({e}); using heuristic")
-            cache[key] = guess
+            if source == "model":
+                cache[key] = guess  # never cache a fallback, so the model gets another try
         log(f"  [{i}/{len(files)}] {info.path.name}")
-        stem = f"{info.date} {guess['name']}" if dated else guess["name"]
+        has_date = re.search(r"\d{4}-\d{2}-\d{2}", guess["name"])
+        stem = f"{info.date} {guess['name']}" if dated and not has_date else guess["name"]
         suffix = f".{info.ext}" if info.ext else ""
         target = unique_destination(folder / guess["category"] / f"{stem}{suffix}", taken)
         if target.resolve() == info.path.resolve():
@@ -405,6 +449,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
                    help="Ollama server URL")
     p.add_argument("--no-ai", action="store_true", help="skip the model, sort by extension only")
+    p.add_argument("--cpu", action="store_true",
+                   help="run the model on the CPU (automatic if the GPU fails to load it)")
     p.add_argument("--no-date", action="store_true", help="don't prefix names with the file date")
     p.add_argument("--settle", type=int, default=120,
                    help="ignore files modified in the last N seconds (default: 120)")
@@ -431,7 +477,8 @@ def main(argv: list[str] | None = None) -> int:
 
     model = None
     if not args.no_ai:
-        candidate = Ollama(args.host, args.model)
+        candidate = Ollama(args.host, args.model, cpu=args.cpu,
+                           log=(lambda *_: None) if args.json else print)
         if candidate.available():
             model = candidate
         else:

@@ -20,6 +20,8 @@ import slothsort
 
 class FakeOllama(BaseHTTPRequestHandler):
     calls = 0
+    gpu_broken = False
+    down = False
 
     def log_message(self, *args):
         pass
@@ -38,14 +40,18 @@ class FakeOllama(BaseHTTPRequestHandler):
     def do_POST(self):
         FakeOllama.calls += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if FakeOllama.down or (FakeOllama.gpu_broken and body["options"].get("num_gpu") != 0):
+            self.send_response(500)
+            self.end_headers()
+            return
         prompt = body["messages"][-1]["content"]
-        assert body["format"]["properties"]["category"]["enum"] == slothsort.CATEGORIES
+        assert set(body["format"]["properties"]["category"]["enum"]) <= set(slothsort.CATEGORIES)
         if "Tokopedia" in prompt:
             answer = {"category": "Invoices & Receipts", "name": "Tokopedia Order Headphones", "reason": "order receipt"}
         elif "Quarterly" in prompt:
             answer = {"category": "Documents", "name": "q3 quarterly report draft", "reason": "report text"}
         else:
-            answer = {"category": "Made Up", "name": "!!!", "reason": "unsure"}
+            answer = {"category": "Video" if "setup" in prompt else "Made Up", "name": "!!!", "reason": "unsure"}
         self._send({"message": {"role": "assistant", "content": json.dumps(answer)}})
 
 
@@ -88,6 +94,8 @@ class SlothsortTest(unittest.TestCase):
         fresh = self.dir / "just-arrived.pdf"
         fresh.write_text("x")
         FakeOllama.calls = 0
+        FakeOllama.gpu_broken = False
+        FakeOllama.down = False
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -114,8 +122,9 @@ class SlothsortTest(unittest.TestCase):
         files = self.listing()
         self.assertIn("Invoices & Receipts/tokopedia-order-headphones.txt", files)
         self.assertIn("Documents/q3-quarterly-report-draft.docx", files)
-        # model answered with an invalid category and empty-ish name -> sanitised
-        self.assertIn("Other/untitled.bin", files)
+        # nothing readable inside, so the model isn't asked; the name is just tidied
+        self.assertIn("Other/mystery.bin", files)
+        self.assertIn("Installers/setup-v2.exe", files)
         # skipped: partial download, OS file, and a file that just arrived
         for kept in ("still-downloading.crdownload", "desktop.ini", "just-arrived.pdf"):
             self.assertIn(kept, files)
@@ -157,9 +166,37 @@ class SlothsortTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Falling back", out)
 
+    def test_broken_gpu_falls_back_to_cpu(self):
+        FakeOllama.gpu_broken = True
+        _, out = self.run_cli("--apply", "--no-date")
+        self.assertIn("switching to CPU", out)
+        self.assertIn("Documents/q3-quarterly-report-draft.docx", self.listing())
+
+    def test_failures_are_not_cached(self):
+        FakeOllama.down = True
+        _, out = self.run_cli()
+        self.assertIn("using heuristic", out)
+        FakeOllama.down = False
+        self.run_cli("--apply", "--no-date")
+        self.assertIn("Documents/q3-quarterly-report-draft.docx", self.listing())
+
+    def test_extension_limits_the_model(self):
+        # the fake model files this script under Video; the extension overrules it
+        p = self.dir / "tool.py"
+        p.write_text("print('setup')")
+        os.utime(p, (time.time() - 3600,) * 2)
+        self.run_cli("--apply", "--no-date")
+        self.assertIn("Code/untitled.py", self.listing())
+
+    def test_no_double_date(self):
+        self.run_cli("--apply", "--no-ai")
+        self.assertIn("Screenshots/screenshot-2026-10-01-101010.png", self.listing())
+
     def test_slugify(self):
         self.assertEqual(slothsort.slugify("Final  Report (2) copy.PDF"), "report")
         self.assertEqual(slothsort.slugify("***"), "untitled")
+        self.assertEqual(slothsort.slugify("CV_final_FINAL"), "cv")
+        self.assertEqual(slothsort.slugify("Setup-x64-1.105.0"), "setup-x64-1-105-0")
 
 
 if __name__ == "__main__":
