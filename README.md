@@ -83,6 +83,13 @@ PDF text is read if you `pip install pypdf`; `.docx`, `.pptx`, `.xlsx` and plain
 4. **Plan** destinations as `Category/YYYY-MM-DD descriptive-name.ext`, resolving clashes.
 5. **Apply** moves one at a time, logging each one to `.slothsort/history.jsonl` as it happens, so even an interrupted run can be undone.
 
+## Try it on a fake messy folder
+
+```bash
+python make_demo_folder.py demo-downloads   # 21 realistic, harmless files
+python slothsort.py demo-downloads
+```
+
 ## Tests
 
 ```bash
