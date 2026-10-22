@@ -5,19 +5,28 @@
 slothsort looks at every file in a messy folder, asks a small open-weight model running on your own machine (Gemma, via [Ollama](https://ollama.com)) what it is, and proposes a folder and a human-readable name for it:
 
 ```
-Invoices & Receipts/
-   invoice_8812(1).pdf
-     -> 2026-10-03 tokopedia-order-headphones.pdf   (order receipt for wireless headphones)
+Code/
+   script (1).py
+     -> 2026-09-26 hacker-news-top-stories.py   (Python script scrapes hacker news front page titles.)
 Documents/
    Doc1.docx
-     -> 2026-10-07 q3-quarterly-report-draft.docx   (draft of quarterly board report)
+     -> 2026-10-15 quarterly-report-q3-2026.docx   (Report details revenue growth and board meeting preparation.)
+   Document (3).docx
+     -> 2026-10-13 acme-corp-frontend-developer-cover.docx   (Clearly a cover letter for a developer role.)
+Invoices & Receipts/
+   download.txt
+     -> 2026-10-12 apartment-4b-lease-renewal.txt   (Confirms lease renewal details with apartment address.)
+   invoice_8812(1).txt
+     -> 2026-10-07 tokopedia-invoice-wh-200.txt   (Clearly an invoice from Tokopedia for headphones.)
 Screenshots/
    Screenshot 2026-10-01 101010.png
-     -> 2026-10-01 screenshot-2026-10-01-101010.png  (matched by file extension)
-
-3 file(s), 3 folder(s). Roughly 1 minute(s) of clicking you won't have to do.
+     -> screenshot-2026-10-01-101010.png   (matched by file extension)
+...
+20 file(s), 10 folder(s). Roughly 8 minute(s) of clicking you won't have to do.
 This was a dry run. Add --apply to move the files.
 ```
+
+*(Real output from `gemma3:4b` on the demo folder, trimmed. 94 seconds on a laptop CPU.)*
 
 It's built for sloths, so it's also built to be safe:
 
@@ -68,6 +77,7 @@ schtasks /Create /SC DAILY /ST 03:00 /TN slothsort /TR "python C:\path\to\sloths
 | `--model NAME` | Any Ollama model (default `gemma3:4b`, or `$SLOTHSORT_MODEL`) |
 | `--host URL` | Ollama server (default `http://localhost:11434`, or `$OLLAMA_HOST`) |
 | `--no-ai` | Skip the model, sort by extension only |
+| `--cpu` | Run the model on the CPU (happens automatically if the GPU can't load it) |
 | `--no-date` | Don't prefix new names with the file's date |
 | `--settle N` | Ignore files modified in the last N seconds (default 120) |
 | `--limit N` | Only look at the first N files |
@@ -79,7 +89,7 @@ PDF text is read if you `pip install pypdf`; `.docx`, `.pptx`, `.xlsx` and plain
 
 1. **Scan** the top level of the folder, skip anything hidden, partial or brand new.
 2. **Peek** at up to 1,200 characters of each file's text.
-3. **Ask** the local model for `{category, name, reason}`, using Ollama's structured outputs with a JSON schema, so the category is always one of a fixed list and a 1B model can't wander off.
+3. **Ask** the local model for `{category, name, reason}`, using Ollama's structured outputs with a JSON schema. The file's extension decides which folders are allowed (a `.py` can only be Code; a `.txt` can be Documents or Invoices & Receipts), so the model picks among sensible options and can't misfile. Files with no readable text skip the model and just get their name tidied.
 4. **Plan** destinations as `Category/YYYY-MM-DD descriptive-name.ext`, resolving clashes.
 5. **Apply** moves one at a time, logging each one to `.slothsort/history.jsonl` as it happens, so even an interrupted run can be undone.
 
