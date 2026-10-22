@@ -2,6 +2,8 @@
 
 **Tidy your Downloads folder without lifting a finger, or sending a single byte to the cloud.**
 
+![slothsort tidying a messy Downloads folder with Gemma, then undoing it](docs/demo.gif)
+
 slothsort looks at every file in a messy folder, asks a small open-weight model running on your own machine (Gemma, via [Ollama](https://ollama.com)) what it is, and proposes a folder and a human-readable name for it:
 
 ```
